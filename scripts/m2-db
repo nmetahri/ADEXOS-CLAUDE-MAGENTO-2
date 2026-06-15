@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Read-only query runner for Magento 2 databases.
+#   m2-db local   "<SQL>"   -> the `db` container (docker compose exec)
+#   m2-db preprod "<SQL>"   -> remote DB over an ephemeral SSH tunnel
+#   m2-db prod    "<SQL>"   -> remote DB over an ephemeral SSH tunnel
+#
+# Credentials live in ~/.config/m2-secrets/<project>-<env>.cnf (KEY=VALUE, 0600),
+# created by m2-db-setup. For `local` the file is optional — it falls back to the
+# maker's standard credentials. Real read-only enforcement is the read-only DB
+# user; the verb check below is a cheap extra guard.
+
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/m2-common.sh"
+
+# Local DB fallbacks (maker defaults) — only used if no local secret file exists.
+readonly LOCAL_DEFAULT_USER="database"
+readonly LOCAL_DEFAULT_PASS="database"
+readonly LOCAL_DEFAULT_NAME="database"
+readonly LOCAL_DB_SERVICE="db"
+
+ENV="${1:-}"
+QUERY="${2:-}"
+
+if [[ -z "$ENV" || -z "$QUERY" ]]; then
+    echo "Usage: m2-db <local|preprod|prod> \"<SQL query>\"" >&2
+    echo "       m2-db local \"SELECT COUNT(*) FROM core_config_data\"" >&2
+    exit 1
+fi
+
+case "$ENV" in
+    local|preprod|prod) ;;
+    *) echo "Error: env must be 'local', 'preprod' or 'prod', got '$ENV'" >&2; exit 1 ;;
+esac
+
+if ! grep -iqE '^[[:space:]]*(select|show|describe|desc|explain)\b' <<<"$QUERY"; then
+    echo "Error: read-only access — query must start with SELECT/SHOW/DESCRIBE/EXPLAIN" >&2
+    exit 1
+fi
+
+ROOT=$(m2_find_project_root) \
+    || { echo "Error: no .env found (searched from $PWD upwards). Run from inside a Magento 2 project." >&2; exit 1; }
+PROJECT_NAME=$(m2_project_name "$ROOT") || exit 1
+
+CREDENTIALS="$HOME/.config/m2-secrets/$PROJECT_NAME-$ENV.cnf"
+read_secret() { grep -E "^$1=" "$CREDENTIALS" | head -n1 | cut -d= -f2-; }
+
+# ── Local: query the db container directly ────────────────────────────────────
+if [[ "$ENV" == "local" ]]; then
+    DB_USER="$LOCAL_DEFAULT_USER"; DB_PASS="$LOCAL_DEFAULT_PASS"; DB_NAME="$LOCAL_DEFAULT_NAME"
+    if [[ -f "$CREDENTIALS" ]]; then
+        DB_USER=$(read_secret DB_USER); DB_PASS=$(read_secret DB_PASS)
+        NAME_OVERRIDE=$(read_secret DB_NAME); [[ -n "$NAME_OVERRIDE" ]] && DB_NAME="$NAME_OVERRIDE"
+    fi
+
+    m2_compose_cmd "$ROOT" "$PROJECT_NAME" || exit 1
+    exec "${DC[@]}" exec -T -e MYSQL_PWD="$DB_PASS" "$LOCAL_DB_SERVICE" \
+        mysql -u"$DB_USER" "$DB_NAME" -e "$QUERY"
+fi
+
+# ── Remote (preprod/prod): SSH tunnel + mysql ─────────────────────────────────
+if [[ ! -f "$CREDENTIALS" ]]; then
+    echo "Error: credentials not found at $CREDENTIALS" >&2
+    echo "Set up with: m2-db-setup" >&2
+    exit 1
+fi
+
+SSH_HOST=$(read_secret SSH_HOST)
+SSH_PORT=$(read_secret SSH_PORT)
+SSH_USER=$(read_secret SSH_USER)
+DB_HOST=$(read_secret DB_HOST)
+DB_PORT=$(read_secret DB_PORT)
+DB_NAME=$(read_secret DB_NAME)
+DB_USER=$(read_secret DB_USER)
+DB_PASS=$(read_secret DB_PASS)
+
+for field in SSH_HOST SSH_USER DB_HOST DB_PORT DB_USER; do
+    [[ -n "${!field}" ]] || { echo "Error: $field missing in $CREDENTIALS — re-run m2-db-setup" >&2; exit 1; }
+done
+
+# Temp files: mysql defaults (password) + ssh control socket. Cleaned on exit.
+TMP_CNF=$(mktemp)
+CONTROL=$(mktemp -u)
+cleanup() {
+    [[ -S "$CONTROL" ]] && ssh -S "$CONTROL" -O exit "$SSH_USER@$SSH_HOST" 2>/dev/null || true
+    rm -f "$TMP_CNF"
+}
+trap cleanup EXIT
+
+LOCAL_PORT=$(( (RANDOM % 20000) + 20000 ))
+
+ssh -f -N -M -S "$CONTROL" \
+    -o ExitOnForwardFailure=yes -o BatchMode=yes -o ConnectTimeout=10 \
+    -p "${SSH_PORT:-22}" \
+    -L "127.0.0.1:$LOCAL_PORT:$DB_HOST:$DB_PORT" \
+    "$SSH_USER@$SSH_HOST" \
+    || { echo "Error: SSH tunnel to $SSH_USER@$SSH_HOST failed (key/agent? ~/.ssh/config?)" >&2; exit 1; }
+
+umask 077
+printf '[client]\nhost=127.0.0.1\nport=%s\nuser=%s\npassword=%s\ndatabase=%s\n' \
+    "$LOCAL_PORT" "$DB_USER" "$DB_PASS" "$DB_NAME" > "$TMP_CNF"
+
+mysql --defaults-extra-file="$TMP_CNF" -e "$QUERY"

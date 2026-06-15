@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Interactive setup for Magento 2 remote DB credentials (SSH tunnel model).
+# Mirrors a PhpStorm data source: an SSH connection + the DB behind it.
+# Creates ~/.config/m2-secrets/<project>-<env>.cnf (chmod 600), KEY=VALUE format.
+#
+# Usage:
+#   m2-db-setup                      # fully interactive
+#   m2-db-setup <project> <env>      # pre-fills project+env, prompts for the rest
+
+set -euo pipefail
+
+SECRETS_DIR="$HOME/.config/m2-secrets"
+mkdir -p "$SECRETS_DIR"
+chmod 700 "$SECRETS_DIR"
+
+echo "=== Magento 2 Remote DB Setup (SSH tunnel) ==="
+echo ""
+
+if [[ -n "${1:-}" && -n "${2:-}" ]]; then
+    PROJECT_NAME="$1"
+    ENV="$2"
+    echo "Project: $PROJECT_NAME | Env: $ENV"
+    echo ""
+else
+    read -rp "Project name (from PROJECT_NAME in .env): " PROJECT_NAME
+    read -rp "Environment [local/preprod/prod]: " ENV
+fi
+
+case "$ENV" in
+    local|preprod|prod) ;;
+    *) echo "Error: env must be 'local', 'preprod' or 'prod', got '$ENV'" >&2; exit 1 ;;
+esac
+
+CREDENTIALS="$SECRETS_DIR/$PROJECT_NAME-$ENV.cnf"
+umask 077
+
+if [[ "$ENV" == "local" ]]; then
+    echo "-- Local DB (only needed if you customised the maker's default credentials) --"
+    read -rp "DB user [database]: " DB_USER
+    DB_USER="${DB_USER:-database}"
+    read -rsp "DB password: " DB_PASS
+    echo ""
+
+    cat > "$CREDENTIALS" <<EOF
+DB_USER=$DB_USER
+DB_PASS=$DB_PASS
+EOF
+    chmod 600 "$CREDENTIALS"
+    echo "Credentials saved to $CREDENTIALS (chmod 600)"
+    echo "Test with: m2-db local \"SELECT 1\""
+    exit 0
+fi
+
+echo "-- SSH (the preprod/prod server you tunnel through) --"
+read -rp "SSH host: " SSH_HOST
+read -rp "SSH port [22]: " SSH_PORT
+SSH_PORT="${SSH_PORT:-22}"
+read -rp "SSH user: " SSH_USER
+
+echo ""
+echo "-- Database (as reachable FROM the SSH host) --"
+read -rp "DB host [127.0.0.1]: " DB_HOST
+DB_HOST="${DB_HOST:-127.0.0.1}"
+read -rp "DB port [3306]: " DB_PORT
+DB_PORT="${DB_PORT:-3306}"
+read -rp "DB name: " DB_NAME
+read -rp "DB user (read-only): " DB_USER
+read -rsp "DB password: " DB_PASS
+echo ""
+
+cat > "$CREDENTIALS" <<EOF
+SSH_HOST=$SSH_HOST
+SSH_PORT=$SSH_PORT
+SSH_USER=$SSH_USER
+DB_HOST=$DB_HOST
+DB_PORT=$DB_PORT
+DB_NAME=$DB_NAME
+DB_USER=$DB_USER
+DB_PASS=$DB_PASS
+EOF
+chmod 600 "$CREDENTIALS"
+
+echo "Credentials saved to $CREDENTIALS (chmod 600)"
+echo "SSH auth uses your key/agent (BatchMode) — add the host to ~/.ssh/config if needed."
+echo "Test with: m2-db $ENV \"SELECT 1\""

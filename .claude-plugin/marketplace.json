@@ -1,0 +1,13 @@
+{
+  "name": "adexos",
+  "owner": {
+    "name": "Adexos"
+  },
+  "plugins": [
+    {
+      "name": "adexos-magento2",
+      "source": "./",
+      "description": "Container-first Magento 2 development tooling for Adexos projects."
+    }
+  ]
+}

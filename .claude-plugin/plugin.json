@@ -1,0 +1,15 @@
+{
+  "name": "adexos-magento2",
+  "version": "1.0.0",
+  "description": "Container-first Magento 2 development for Adexos projects: enforces the custom maker, secure read-only remote DB access, and credential protection.",
+  "author": {
+    "name": "Adexos"
+  },
+  "keywords": [
+    "magento2",
+    "magento",
+    "docker",
+    "adexos",
+    "ecommerce"
+  ]
+}

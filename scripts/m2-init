@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# Generate a tailored CLAUDE.md for a Magento 2 project (maker-based).
+# Run from the project root (where Makefile and .env live).
+# Non-interactive: pass --force to overwrite an existing CLAUDE.md.
+# Remote DB credentials are set up separately with m2-db-setup.
+
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/m2-common.sh"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+ok()   { echo -e "${GREEN}✓${NC} $*"; }
+info() { echo -e "${CYAN}→${NC} $*"; }
+warn() { echo -e "${YELLOW}⚠${NC} $*"; }
+fail() { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
+
+FORCE=0
+[[ "${1:-}" == "--force" ]] && FORCE=1
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+[[ -f ".env" ]]                      || fail "No .env found. Run from project root."
+[[ -f "Makefile" ]]                  || fail "No Makefile found. Run from project root."
+[[ -d ".maker" ]]                    || fail "No .maker/ directory. Not a maker-based M2 project."
+[[ -f ".maker/docker-compose.yml" ]] || fail "No .maker/docker-compose.yml. Run 'make pull' first."
+
+# ── Read .env ─────────────────────────────────────────────────────────────────
+
+read_env() { m2_read_env .env "$1"; }
+
+PROJECT_NAME=$(read_env PROJECT_NAME)
+MAGENTO2_VERSION=$(read_env MAGENTO2_VERSION)
+BLACKFIRE_ENABLED=$(read_env BLACKFIRE_ENABLED)
+GOTENBERG_ENABLED=$(read_env GOTENBERG_ENABLED)
+OPENSEARCH_ENABLED=$(read_env OPENSEARCH_ENABLED)
+
+[[ -n "$PROJECT_NAME" ]]     || fail "PROJECT_NAME not set in .env"
+[[ -n "$MAGENTO2_VERSION" ]] || fail "MAGENTO2_VERSION not set in .env"
+
+# ── Detect stack ──────────────────────────────────────────────────────────────
+
+SEARCH_ENGINE="Elasticsearch"
+[[ "$OPENSEARCH_ENABLED" == "1" ]] && SEARCH_ENGINE="OpenSearch"
+
+STACK_EXTRAS=""
+[[ "$BLACKFIRE_ENABLED" == "1" ]]  && STACK_EXTRAS="${STACK_EXTRAS}+ Blackfire (profile: \`make blackfire-cli <cmd>\`)\n"
+[[ "$GOTENBERG_ENABLED" == "1" ]]  && STACK_EXTRAS="${STACK_EXTRAS}+ Gotenberg (PDF generation)\n"
+
+# ── Detect extra make targets ─────────────────────────────────────────────────
+
+EXTRA_TARGETS_SECTION=""
+if [[ -f ".maker_additional/Makefile.mk" ]]; then
+    TABLE_ROWS=""
+    while IFS= read -r line; do
+        target=$(echo "$line" | sed 's/:.*//')
+        description=$(echo "$line" | sed 's/.*## //')
+        TABLE_ROWS="${TABLE_ROWS}| \`make ${target}\` | ${description} |\n"
+    done < <(grep -E '^[a-zA-Z_-]+:.*##' .maker_additional/Makefile.mk || true)
+
+    if [[ -n "$TABLE_ROWS" ]]; then
+        EXTRA_TARGETS_SECTION="## Project-Specific Make Targets
+
+| Command | Description |
+|---|---|
+$(printf "%b" "$TABLE_ROWS")"
+    fi
+fi
+
+# ── CLAUDE.md generation ──────────────────────────────────────────────────────
+
+echo ""
+echo -e "${BOLD}=== m2-init: $PROJECT_NAME ===${NC}"
+echo ""
+info "Detected: Magento $MAGENTO2_VERSION | Search: $SEARCH_ENGINE"
+[[ -n "$STACK_EXTRAS" ]] && info "Extras: $(printf "%b" "$STACK_EXTRAS" | tr '\n' ' ')"
+echo ""
+
+if [[ -f "CLAUDE.md" && "$FORCE" == "0" ]]; then
+    warn "CLAUDE.md already exists. Re-run with --force to overwrite. Nothing written."
+    exit 0
+fi
+
+{
+    echo "# Project: $PROJECT_NAME"
+    echo ""
+    echo "Magento 2 rules are provided by the \`adexos-magento2\` Claude Code plugin (skill \`magento2\`)."
+    echo ""
+    echo "## Environment"
+    echo ""
+    echo "- \`PROJECT_NAME=$PROJECT_NAME\`"
+    echo "- \`MAGENTO2_VERSION=$MAGENTO2_VERSION\`"
+    echo "- Search engine: $SEARCH_ENGINE"
+    echo ""
+    echo "## Stack"
+    echo ""
+    printf "PHP app + MySQL + %s + Redis + Varnish + Mailpit\n" "$SEARCH_ENGINE"
+    [[ -n "$STACK_EXTRAS" ]] && printf "%b" "$STACK_EXTRAS"
+    echo ""
+    if [[ -n "$EXTRA_TARGETS_SECTION" ]]; then
+        echo "$EXTRA_TARGETS_SECTION"
+        echo ""
+    fi
+    echo "## DB Access"
+    echo ""
+    echo "Use the \`/m2-db\` command (read-only):"
+    echo ""
+    echo '```'
+    echo "/m2-db local \"<query>\""
+    echo "/m2-db preprod \"<query>\""
+    echo "/m2-db prod \"<query>\""
+    echo '```'
+    echo ""
+    echo "\`local\` uses the maker's default credentials (the \`db\` container)."
+    echo "\`preprod\`/\`prod\` connect over SSH using \`~/.config/m2-secrets/$PROJECT_NAME-<env>.cnf\`."
+    echo "Set those up once with \`/m2-db-setup\` (also \`local\` if you customised its credentials)."
+} > CLAUDE.md
+
+ok "CLAUDE.md created for project '$PROJECT_NAME'."

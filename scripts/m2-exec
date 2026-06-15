@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Run a command in the app container as www-data (non-interactive).
+# Use this instead of `make ex` which opens an interactive shell Claude cannot use.
+# Usage: m2-exec <command> [args...]
+# Example: m2-exec bin/magento module:status
+#          m2-exec composer diagnose
+#          m2-exec bin/magento indexer:reindex
+
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/m2-common.sh"
+
+[[ $# -gt 0 ]] || { echo "Usage: m2-exec <command> [args...]" >&2; exit 1; }
+
+ROOT=$(m2_find_project_root) \
+    || { echo "Error: no Magento 2 project root found (searched from $PWD upwards)" >&2; exit 1; }
+
+# Never `source` .env (values may not be shell-safe); docker compose reads it via --env-file.
+PROJECT_NAME=$(m2_project_name "$ROOT") || exit 1
+m2_compose_cmd "$ROOT" "$PROJECT_NAME" || exit 1
+
+# Run the command directly (no shell wrapper). Use real binaries: `bin/magento`,
+# `composer`, `n98-magerun2` — not container aliases like `m` (those need an
+# interactive shell, which has no TTY here).
+exec "${DC[@]}" exec -T --user=www-data app "$@"
