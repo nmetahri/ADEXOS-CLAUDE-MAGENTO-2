@@ -42,7 +42,15 @@ ROOT=$(m2_find_project_root) \
 PROJECT_NAME=$(m2_project_name "$ROOT") || exit 1
 
 CREDENTIALS="$HOME/.config/m2-secrets/$PROJECT_NAME-$ENV.cnf"
-read_secret() { grep -E "^$1=" "$CREDENTIALS" | head -n1 | cut -d= -f2-; }
+# Pure-bash so a missing key returns empty instead of tripping `set -euo pipefail`
+# (grep exits 1 on no match; `grep | head` can also SIGPIPE under pipefail).
+read_secret() {
+    local key="$1" line value=""
+    while IFS= read -r line; do
+        [[ "$line" == "$key="* ]] && { value="${line#*=}"; break; }
+    done < "$CREDENTIALS"
+    printf '%s' "$value"
+}
 
 # ── Local: query the db container directly ────────────────────────────────────
 if [[ "$ENV" == "local" ]]; then
