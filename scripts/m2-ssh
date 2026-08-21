@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Restricted SSH access to a Magento 2 preprod/prod server.
+#   m2-ssh preprod tail -n 200 var/log/system.log
+#   m2-ssh prod df -h
+#
+# Every path argument is resolved against M2_ROOT — the Magento 2 root on that
+# server, given once during m2-db-setup — and must land under var/log or
+# var/report. Deployment secrets (.env, app/etc/env.php, auth.json, SSH keys)
+# are therefore unreachable through this entry point.
+#
+# Two families of remote commands are accepted:
+#   * log readers  — paths resolved and validated as above
+#   * host status  — read-only system reporting, no file arguments at all
+#
+# SSH host/port/user come from the same credential file as m2-db. Arguments are
+# shell-quoted before they reach the remote shell.
+
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/m2-common.sh"
+
+# Commands that read files. Every path argument is resolved and validated.
+readonly ALLOWED_FILE_COMMANDS="cat head tail grep ls wc stat du"
+# Commands that report host state. They accept flags only — never a path.
+readonly ALLOWED_STATUS_COMMANDS="df free uptime hostname whoami date nproc ps who uname"
+# `grep` takes a pattern before its paths; every other file command takes paths only.
+readonly PATTERN_FIRST_COMMANDS="grep"
+
+# Within M2_ROOT, only log directories are readable.
+readonly LOG_PATH_PATTERN='/var/(log|report)(/|$)'
+# Defence in depth: reject these names even if one ever lands under var/log.
+readonly SECRET_NAME_PATTERN='(^|/)(\.env[^/]*|env\.php|config\.php|auth\.json|\.my\.cnf|\.netrc|id_[a-z0-9]+|.*credentials.*)$'
+# Streaming flags would never return; this script must terminate.
+readonly FOLLOW_FLAG_PATTERN='^(-f|-F|--follow(=.*)?|--retry)$'
+
+readonly SSH_TIMEOUT_SECONDS=60
+readonly MAX_OUTPUT_BYTES=262144
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: m2-ssh <preprod|prod> <command> [args...]
+
+Log readers  : cat head tail grep ls wc stat du
+               Paths are relative to the Magento 2 root configured for this
+               project/env, and must be under var/log or var/report.
+Host status  : df free uptime hostname whoami date nproc ps who uname
+               No path arguments.
+
+  m2-ssh prod    tail -n 200 var/log/exception.log
+  m2-ssh prod    grep CRITICAL var/log/system.log
+  m2-ssh preprod ls -la var/log
+  m2-ssh prod    df -h
+
+Reading deployment secrets (.env, env.php, auth.json, keys) is refused by design.
+Use /m2-db for database access — it tunnels to the DB with its own credentials.
+EOF
+    exit 1
+}
+
+is_flag()      { [[ "$1" == -* ]]; }
+is_numeric()   { [[ "$1" =~ ^[0-9]+$ ]]; }
+in_word_list() { [[ " $2 " == *" $1 "* ]]; }
+
+deny() {
+    echo "Error: $1" >&2
+    echo "m2-ssh only reads var/log and var/report under $M2_ROOT. Run 'm2-ssh' with no arguments for the allowed set." >&2
+    exit 1
+}
+
+# Resolve one path argument against M2_ROOT and confirm it names a log location.
+# Echoes the absolute remote path so the caller sends an unambiguous command.
+resolve_log_path() {
+    local path="$1"
+    [[ "$path" != *".."* ]] \
+        || deny "path '$path' contains '..'"
+    [[ "$path" == /* ]] || path="$M2_ROOT/$path"
+    [[ "$path" == "$M2_ROOT/"* ]] \
+        || deny "path '$path' is outside the configured Magento root $M2_ROOT"
+    [[ "$path" =~ $LOG_PATH_PATTERN ]] \
+        || deny "path '$path' is outside var/log and var/report"
+    [[ ! "$path" =~ $SECRET_NAME_PATTERN ]] \
+        || deny "path '$path' names a credential file"
+    printf '%s\n' "$path"
+}
+
+# File commands: flags and bare numbers pass through untouched, every other
+# argument is a path and gets rewritten to its resolved absolute form. For grep,
+# the first such argument is the search pattern rather than a path.
+build_file_command_arguments() {
+    local command_name="$1"; shift
+    local expects_pattern=0 path_count=0 argument
+    in_word_list "$command_name" "$PATTERN_FIRST_COMMANDS" && expects_pattern=1
+    REMOTE_ARGUMENTS=()
+
+    for argument in "$@"; do
+        if is_flag "$argument"; then
+            [[ ! "$argument" =~ $FOLLOW_FLAG_PATTERN ]] \
+                || deny "streaming flag '$argument' would never return"
+            REMOTE_ARGUMENTS+=("$argument")
+            continue
+        fi
+        if is_numeric "$argument"; then
+            REMOTE_ARGUMENTS+=("$argument")
+            continue
+        fi
+        if (( expects_pattern )); then
+            expects_pattern=0
+            REMOTE_ARGUMENTS+=("$argument")
+            continue
+        fi
+        REMOTE_ARGUMENTS+=("$(resolve_log_path "$argument")")
+        (( path_count++ )) || true
+    done
+
+    (( path_count > 0 )) \
+        || deny "'$command_name' needs an explicit path under var/log or var/report"
+}
+
+# Status commands report on the host itself: flags and bare words only, so no
+# file can be smuggled in as an argument.
+build_status_command_arguments() {
+    local command_name="$1"; shift
+    local argument
+    REMOTE_ARGUMENTS=()
+    for argument in "$@"; do
+        [[ "$argument" != */* && "$argument" != *.* ]] \
+            || deny "'$command_name' takes no file argument (got '$argument')"
+        REMOTE_ARGUMENTS+=("$argument")
+    done
+}
+
+ENV="${1:-}"
+M2_ROOT=""   # filled from the credential file; referenced by deny() messages
+[[ -n "$ENV" ]] || usage
+shift || true
+
+case "$ENV" in
+    preprod|prod) ;;
+    local) echo "Error: 'local' runs in Docker — use /m2-exec instead of m2-ssh." >&2; exit 1 ;;
+    *) echo "Error: env must be 'preprod' or 'prod', got '$ENV'" >&2; exit 1 ;;
+esac
+
+[[ $# -gt 0 ]] || usage
+REMOTE_COMMAND_NAME="$1"; shift
+
+ROOT=$(m2_find_project_root) \
+    || { echo "Error: no .env found (searched from $PWD upwards). Run from inside a Magento 2 project." >&2; exit 1; }
+PROJECT_NAME=$(m2_project_name "$ROOT") || exit 1
+CREDENTIALS=$(m2_credentials_file "$PROJECT_NAME" "$ENV")
+m2_load_ssh_credentials "$CREDENTIALS" || exit 1
+
+M2_ROOT=$(m2_read_secret "$CREDENTIALS" M2_ROOT)
+M2_ROOT="${M2_ROOT%/}"
+[[ -n "$M2_ROOT" ]] || {
+    echo "Error: M2_ROOT missing in $CREDENTIALS." >&2
+    echo "It is the Magento 2 root on the $ENV server (for example /var/www/$PROJECT_NAME/current)." >&2
+    echo "Re-run m2-db-setup for $PROJECT_NAME $ENV to record it." >&2
+    exit 1
+}
+[[ "$M2_ROOT" == /* ]] \
+    || { echo "Error: M2_ROOT in $CREDENTIALS must be an absolute path, got '$M2_ROOT'" >&2; exit 1; }
+
+if in_word_list "$REMOTE_COMMAND_NAME" "$ALLOWED_FILE_COMMANDS"; then
+    build_file_command_arguments "$REMOTE_COMMAND_NAME" "$@"
+elif in_word_list "$REMOTE_COMMAND_NAME" "$ALLOWED_STATUS_COMMANDS"; then
+    build_status_command_arguments "$REMOTE_COMMAND_NAME" "$@"
+else
+    deny "'$REMOTE_COMMAND_NAME' is not an allowed remote command"
+fi
+
+# Quote each argument so the remote login shell treats it as one literal token —
+# validated paths cannot turn into globs, expansions or extra commands.
+REMOTE_COMMAND=$(printf '%q' "$REMOTE_COMMAND_NAME")
+for argument in "${REMOTE_ARGUMENTS[@]}"; do
+    REMOTE_COMMAND+=" $(printf '%q' "$argument")"
+done
+
+# `head` closing the pipe early is the intended cap, not a failure.
+set +o pipefail
+timeout "$SSH_TIMEOUT_SECONDS" ssh -T -n \
+    -o BatchMode=yes -o ConnectTimeout=10 -o RequestTTY=no \
+    -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+    "$REMOTE_COMMAND" | head -c "$MAX_OUTPUT_BYTES"

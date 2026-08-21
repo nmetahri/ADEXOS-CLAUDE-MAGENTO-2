@@ -58,6 +58,15 @@ SSH_PORT="${SSH_PORT:-22}"
 read -rp "SSH user: " SSH_USER
 
 echo ""
+echo "-- Magento 2 root on that server --"
+echo "Absolute path to the Magento installation, e.g. /var/www/$PROJECT_NAME/current."
+echo "m2-ssh resolves every path against it and only reads var/log and var/report."
+read -rp "Magento 2 root path: " M2_ROOT
+M2_ROOT="${M2_ROOT%/}"
+[[ -n "$M2_ROOT" ]]   || { echo "Error: Magento 2 root path is required" >&2; exit 1; }
+[[ "$M2_ROOT" == /* ]] || { echo "Error: Magento 2 root path must be absolute, got '$M2_ROOT'" >&2; exit 1; }
+
+echo ""
 echo "-- Database (as reachable FROM the SSH host) --"
 read -rp "DB host [127.0.0.1]: " DB_HOST
 DB_HOST="${DB_HOST:-127.0.0.1}"
@@ -72,6 +81,7 @@ cat > "$CREDENTIALS" <<EOF
 SSH_HOST=$SSH_HOST
 SSH_PORT=$SSH_PORT
 SSH_USER=$SSH_USER
+M2_ROOT=$M2_ROOT
 DB_HOST=$DB_HOST
 DB_PORT=$DB_PORT
 DB_NAME=$DB_NAME
@@ -83,3 +93,4 @@ chmod 600 "$CREDENTIALS"
 echo "Credentials saved to $CREDENTIALS (chmod 600)"
 echo "SSH auth uses your key/agent (BatchMode) — add the host to ~/.ssh/config if needed."
 echo "Test with: m2-db $ENV \"SELECT 1\""
+echo "           m2-ssh $ENV ls -la var/log"

@@ -96,13 +96,40 @@ credentials in commands.
 
 - `local` runs in the `db` container. It uses the maker's standard credentials by default;
   if a project customised the local DB user/password, configure it with `/m2-db-setup`.
-- `preprod` / `prod` connect over an ephemeral SSH tunnel using credentials from `/m2-db-setup`.
+- `preprod` / `prod` connect over an ephemeral SSH tunnel using credentials from `/m2-db-setup`,
+  which also records the Magento 2 root path on that server for `/m2-ssh`.
 
 **Rules:**
 - Only SELECT/SHOW/DESCRIBE/EXPLAIN queries — access is read-only.
 - Never print or echo the content of credential files.
 - Never run `cat ~/.config/m2-secrets/*` (a hook blocks this anyway).
 - Credentials missing? Set them up with `/m2-db-setup` (run it in your terminal with the `!` prefix — it is interactive).
+
+## Remote Server Access (Preprod / Prod)
+
+Use the **`/m2-ssh`** command. **Never** call `ssh`, `scp`, `sftp` or `rsync` directly against a
+project server — a hook blocks it, and the credentials it would need are not yours to read.
+
+```
+/m2-ssh <preprod|prod> <command> [args...]
+
+/m2-ssh prod    tail -n 200 var/log/exception.log
+/m2-ssh prod    grep CRITICAL var/log/system.log
+/m2-ssh preprod ls -la var/log
+/m2-ssh prod    df -h
+```
+
+- **Log readers** (`cat head tail grep ls wc stat du`) — paths are relative to the Magento 2 root
+  configured for that project/env (`M2_ROOT`, recorded by `/m2-db-setup`) and must be under
+  `var/log` or `var/report`. Anything else is refused.
+- **Host status** (`df free uptime hostname whoami date nproc ps who uname`) — no path arguments.
+
+**Rules:**
+- Never try to read `.env`, `app/etc/env.php`, `app/etc/config.php`, `auth.json` or SSH keys on a
+  remote server. Those are refused by design, and there is no supported workaround.
+- Never derive DB credentials from a server. Use `/m2-db` — it tunnels with its own read-only user.
+- Streaming flags (`tail -f`) are refused: the command must terminate.
+- Output is capped at 256 KB; narrow the query with `grep` or `tail -n` instead of dumping a log.
 
 ## Project-Specific Config
 

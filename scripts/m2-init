@@ -118,6 +118,20 @@ fi
     echo "\`local\` uses the maker's default credentials (the \`db\` container)."
     echo "\`preprod\`/\`prod\` connect over SSH using \`~/.config/m2-secrets/$PROJECT_NAME-<env>.cnf\`."
     echo "Set those up once with \`/m2-db-setup\` (also \`local\` if you customised its credentials)."
+    echo ""
+    echo "## Remote Server Access"
+    echo ""
+    echo "Use the \`/m2-ssh\` command — never raw \`ssh\`/\`scp\` (a hook blocks it):"
+    echo ""
+    echo '```'
+    echo "/m2-ssh prod    tail -n 200 var/log/exception.log"
+    echo "/m2-ssh preprod ls -la var/log"
+    echo "/m2-ssh prod    df -h"
+    echo '```'
+    echo ""
+    echo "Paths are relative to the Magento 2 root recorded for this project by \`/m2-db-setup\`,"
+    echo "and only \`var/log\` and \`var/report\` are readable. Deployment secrets (\`.env\`,"
+    echo "\`app/etc/env.php\`, \`auth.json\`, SSH keys) are refused by design — use \`/m2-db\` for the DB."
 } > CLAUDE.md
 
 ok "CLAUDE.md created for project '$PROJECT_NAME'."

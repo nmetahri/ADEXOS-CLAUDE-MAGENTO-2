@@ -28,6 +28,49 @@ m2_project_name() {
     printf '%s\n' "$name"
 }
 
+# Echo the credential file path for a project/environment pair.
+#   m2_credentials_file <project_name> <env>
+m2_credentials_file() {
+    printf '%s\n' "$HOME/.config/m2-secrets/$1-$2.cnf"
+}
+
+# Read a single KEY from a credential file, or echo nothing if it is absent.
+# Pure bash on purpose: `grep | head` exits non-zero (or SIGPIPEs) on a missing
+# key, which would abort callers running under `set -euo pipefail`.
+#   m2_read_secret <file> <key>
+m2_read_secret() {
+    local file="$1" key="$2" line
+    [[ -f "$file" ]] || return 0
+    while IFS= read -r line; do
+        [[ "$line" == "$key="* ]] && { printf '%s' "${line#*=}"; return 0; }
+    done < "$file"
+    # A while loop inherits the status of its last body command, so a key that is
+    # never matched would return 1 and abort callers under `set -e`.
+    return 0
+}
+
+# Load SSH_HOST/SSH_PORT/SSH_USER for a remote environment into the caller's
+# scope, failing with an actionable message if the credential file is unusable.
+#   m2_load_ssh_credentials <credentials_file>
+m2_load_ssh_credentials() {
+    local file="$1" field
+    [[ -f "$file" ]] || {
+        echo "Error: credentials not found at $file" >&2
+        echo "Set them up with: m2-db-setup" >&2
+        return 1
+    }
+    SSH_HOST=$(m2_read_secret "$file" SSH_HOST)
+    SSH_PORT=$(m2_read_secret "$file" SSH_PORT)
+    SSH_USER=$(m2_read_secret "$file" SSH_USER)
+    SSH_PORT="${SSH_PORT:-22}"
+    for field in SSH_HOST SSH_USER; do
+        [[ -n "${!field}" ]] || {
+            echo "Error: $field missing in $file — re-run m2-db-setup" >&2
+            return 1
+        }
+    done
+}
+
 # Build the project's base `docker compose` command into the global array DC.
 # Mirrors the maker's own DC variable (see the Makefile).
 #   m2_compose_cmd <root> <project_name>
